@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.integrate import simpson
+from scipy.optimize import brentq
 from . import thermal_history
 
 # units
@@ -7,17 +8,20 @@ Mpc = 1.56373831e35 # MeV^-1
 Msol = 1.11580327e60 # MeV
 rhoCrit_h2 = 2.7744948e11 # Msol/Mpc^3
 kB4 = 188971.431 # Msol/Mpc^3/K^4
+km_s = 3.33564e-06
 
 models_WDM = ['VA23','V05']
+VA23_params = {
+  0.5:[0.0437,-1.188,1.049,2.012,0.2463],
+  1.5:[0.0345,-1.195,1.025,2.012,0.2463],
+  }
 
-def transfer_WDM(k,model,mX,omegaX,h,spin=0.5):
+def fsl_WDM(model,mX,omegaX,h,spin=0.5):
   '''
   
-  Warm dark matter transfer function T(k).
+  Warm dark matter free-streaming length.
   
   Parameters:
-    
-    k: float or array
     
     model: 'VA23' or 'V05'
       - 'VA23': Vogel & Abazajian (2023), arXiv:2210.10753
@@ -36,22 +40,75 @@ def transfer_WDM(k,model,mX,omegaX,h,spin=0.5):
   
   Returns:
     
+    l_fs: float
+  
+  '''
+  if model == 'VA23':
+    p = VA23_params[spin]
+    return p[0] * mX**p[1] * (omegaX/0.12)**p[4] * (h/0.6736)**p[3] * h**-1
+  elif model == 'V05':
+    return 0.070 * mX**-1.11 * (omegaX/0.1225)**0.11
+  else:
+    raise Exception('invalid free-streaming model')
+
+def transfer_WDM(k,model,fsl,spin=0.5):
+  '''
+  
+  Warm dark matter transfer function T(k).
+  
+  Parameters:
+    
+    k: float or array
+    
+    model: 'VA23' or 'V05'
+      - 'VA23': Vogel & Abazajian (2023), arXiv:2210.10753
+      - 'V05': Viel et al. (2005), arXiv:astro-ph/0501562
+    
+    fsl: float
+      Free-streaming length (alpha) in Mpc^-1.
+    
+    spin: float
+      1/2 or 3/2. Only relevant if model=='VA23'. Default is 1/2.
+  
+  Returns:
+    
     T(k): array or float
   
   '''
   if model == 'VA23':
-    p = {
-      0.5:[0.0437,-1.188,1.049,2.012,0.2463],
-      1.5:[0.0345,-1.195,1.025,2.012,0.2463],
-      }[spin]
-    alpha = p[0] * mX**p[1] * (omegaX/0.12)**p[4] * (h/0.6736)**p[3] * h**-1
+    p = VA23_params[spin]
     nu = p[2]
   elif model == 'V05':
-    alpha = 0.070 * mX**-1.11 * (omegaX/0.1225)**0.11
     nu = 1.12
   else:
     raise Exception('invalid free-streaming model')
-  return (1. + (alpha*k)**(2.*nu))**(-5./nu)
+  return (1. + (fsl*k)**(2.*nu))**(-5./nu)
+
+def v_WDM(mX,omegaX,spin=0.5):
+  '''
+  
+  Warm dark matter thermal velocity scale (from arXiv:astro-ph/0010389).
+  
+  Parameters:
+    
+    mX: float
+      Dark matter mass in keV.
+      
+    omegaX: float
+      Dark matter density parameter, OmegaX * h^2
+      
+    h: float
+    
+    spin: float
+      Typically 1/2 or 3/2. Default is 1/2.
+  
+  Returns:
+    
+    v: float
+  
+  '''
+  gX = 0.75 * (2*spin+1)
+  return 0.012 * (omegaX/0.12675)**(1./3) * (1.5/gX)**(1./3) * mX**(-4./3)
 
 def transfer_G04(k,m,Td,ad,Hd,aeq,Heq):
   '''
@@ -108,6 +165,7 @@ class Cutoff(thermal_history.ThermalHistory):
         [arXiv:astro-ph/0309621]. Requires m and the decoupling time.
       - 'fs': Numerically integrate the free-streaming length and supply a
         custom cutoff shape. Requires shape, m, decoupling time, and pd.
+        horizon_factor may also be specified.
     
     shape: callable
       Custom cutoff shape, specified as T(x) where x = l_fs k. Here l_fs is the
@@ -130,17 +188,26 @@ class Cutoff(thermal_history.ThermalHistory):
       
     pd: float
       Characteristic momentum at decoupling. Default is pd=Td.
+    
+    horizon_fac: float
+      If specified, only allow free streaming after the free-streaming length
+      is subhorizon by this factor, i.e., k_hor(a) * l_fs <= 1/horizon_factor.
+      Only relevant for some methods. Default is None (free streaming is always
+      allowed), but a value of about 30 is recommended based on
+      arXiv:2604.xxxxx.
       
     verbose: boolean
       Default True. Change to False to suppress messages.
     
   '''
-  def __init__(self,model,shape=None,h=0.6736,OmegaM=0.3089,OmegaB=0.04886,T_CMB=2.725,Neff=3.046,m=None,spin=None,Td=None,ad=None,Hd=None,pd=None,verbose=True):
+  def __init__(self,model,shape=None,h=0.6736,OmegaM=0.3089,OmegaB=0.04886,T_CMB=2.725,Neff=3.046,m=None,spin=None,Td=None,ad=None,Hd=None,pd=None,horizon_fac=None,verbose=True):
     self.model, self.shape = model, shape
     self.m, self.spin = m, spin
     self.h, self.OmegaM, self.OmegaB = h, OmegaM, OmegaB
     
     if model in models_WDM: # For WDM, we don't need the SM thermal history
+      self.fsl_Mpc = fsl_WDM(self.model,self.m,(self.OmegaM-self.OmegaB)*self.h**2,self.h,self.spin)
+      self.v_kms = v_WDM(self.m,(self.OmegaM-self.OmegaB)*self.h**2,self.spin)
       if verbose:
         print('Cutoffs: Warm dark matter, model=%s'%model)
     else: # Otherwise, we do
@@ -159,6 +226,9 @@ class Cutoff(thermal_history.ThermalHistory):
       elif Hd is not None:
         Td = self.T_at_H(Hd)
       self.m, self.Td, self.ad, self.Hd, self.pd = m, Td, self.a(Td), self.H(Td), (pd or Td)
+      self.v = self.pd * self.ad / self.m # velocity at a=1, in units of c
+      
+      self.fsl = np.nan # should implement for G04 at some point
       if model == 'fs':
         self.pc = self.pd*self.ad # comoving momentum
         # prepare integrand:
@@ -167,7 +237,17 @@ class Cutoff(thermal_history.ThermalHistory):
         #
         self.__aL, self.__aE = self.tabr_a[-1], self.tabr_a[0]
         self.__HL, self.__HE = self.tabr_H[-1], self.tabr_H[0]
-        self.fsl_ad = self.fsl(self.ad)
+        
+        self.a0 = self.ad
+        self.fsl = self.fsl_from_a(self.a0)
+        if horizon_fac is not None and horizon_fac * self.a0 * self.H_at_a(self.a0) * self.fsl >= 1.:
+          f = lambda lna: lna + np.log(horizon_fac * self.H_at_a(np.exp(lna)) * self.fsl_from_a(np.exp(lna)))
+          self.a0 = np.exp(brentq(f,np.log(self.ad),np.log(self.aeq)))
+          self.fsl = self.fsl_from_a(self.a0)
+        
+      # for convenience:
+      self.fsl_Mpc = self.fsl/Mpc
+      self.v_kms = self.v/km_s
   
   def transfer(self,k):
     '''
@@ -175,13 +255,13 @@ class Cutoff(thermal_history.ThermalHistory):
     Here k is in Mpc^-1.
     '''
     if self.model in models_WDM:
-      return transfer_WDM(k,self.model,self.m,(self.OmegaM-self.OmegaB)*self.h**2,self.h,self.spin)
+      return transfer_WDM(k,self.model,self.fsl,self.spin)
     if self.model == 'G04':
       return transfer_G04(k/Mpc,self.m,self.Td,self.ad,self.Hd,self.aeq,self.Heq)
     if self.model == 'fs':
-      return self.shape(self.fsl_ad*k/Mpc)
+      return self.shape(self.fsl*k/Mpc)
   
-  def fsl(self,a0):
+  def fsl_from_a(self,a0):
     '''
     Numerically evaluate the streaming distance from scale factor a0 to the
     present time assuming a Standard Model thermal history. Result is in MeV.
