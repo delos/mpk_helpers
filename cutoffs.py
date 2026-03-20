@@ -255,7 +255,7 @@ class Cutoff(thermal_history.ThermalHistory):
     Here k is in Mpc^-1.
     '''
     if self.model in models_WDM:
-      return transfer_WDM(k,self.model,self.fsl,self.spin)
+      return transfer_WDM(k,self.model,self.fsl_Mpc,self.spin)
     if self.model == 'G04':
       return transfer_G04(k/Mpc,self.m,self.Td,self.ad,self.Hd,self.aeq,self.Heq)
     if self.model == 'fs':
